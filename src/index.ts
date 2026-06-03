@@ -5,6 +5,7 @@ export interface UpstreamOptions {
   domain: string;
   protocol?: "http" | "https";
   port?: number;
+  stripPrefix?: boolean;
   onResponse?: OnResponseCallback | OnResponseCallback[];
   onRequest?: OnRequestCallback | OnRequestCallback[];
 }
@@ -24,6 +25,7 @@ export interface Context {
   request: Request;
   response: Response;
   upstream: UpstreamOptions | null;
+  pattern: string;
 }
 
 export interface Reflare {
@@ -39,23 +41,31 @@ export interface Pipeline {
   execute: (context: Context) => Promise<void>;
 }
 
-export function isUrlMatch<P extends PathMatcher>(request: Request, matchers: P[]): P | void {
+interface RouteMatch<P extends PathMatcher> {
+  route: P;
+  pattern: string;
+}
+
+function matchRoute<P extends PathMatcher>(request: Request, matchers: P[]): RouteMatch<P> | void {
   const url = new URL(request.url);
 
   for (const route of matchers) {
     if (route.methods === undefined || route.methods.includes(request.method)) {
-      const match = convertToArray<string>(route.path).some((path) => {
+      for (const path of convertToArray<string>(route.path)) {
         const pattern = new URLPattern({ pathname: path });
-        return pattern.test(url);
-      });
-
-      if (match) {
-        return route;
+        if (pattern.test(url)) {
+          return { route, pattern: path };
+        }
       }
     }
   }
 
   return undefined;
+}
+
+export function isUrlMatch<P extends PathMatcher>(request: Request, matchers: P[]): P | void {
+  const match = matchRoute(request, matchers);
+  return match?.route;
 }
 
 export default async function useReflare(): Promise<Reflare> {
@@ -64,18 +74,19 @@ export default async function useReflare(): Promise<Reflare> {
   const routeList: Route[] = [];
 
   async function handle(request: Request): Promise<Response> {
-    const route = isUrlMatch(request, routeList);
+    const match = matchRoute(request, routeList);
 
-    if (route === undefined) {
-      return createResponse("Failed to find a route that matches the path and method of the current request", 404);
+    if (match === undefined) {
+      return createResponse("Route not found!", 404);
     }
 
     const context: Context = {
       request,
-      route,
-      hostname: getHostname(request),
+      route: match.route,
+      hostname: new URL(request.url).host,
       response: new Response("Unhandled response"),
-      upstream: route.upstream,
+      upstream: match.route.upstream,
+      pattern: match.pattern,
     };
 
     try {
@@ -89,13 +100,8 @@ export default async function useReflare(): Promise<Reflare> {
     return context.response;
   }
 
-  function unshift(route: Route) {
-    routeList.unshift(route);
-  }
-
-  function push(route: Route) {
-    routeList.push(route);
-  }
+  const unshift = (route: Route) => routeList.unshift(route);
+  const push = (route: Route) => routeList.push(route);
 
   return { handle, unshift, push };
 }
@@ -109,12 +115,8 @@ function usePipeline(...initMiddlewares: Middleware[]): Pipeline {
 
   const execute: Pipeline["execute"] = async (context) => {
     const runner = async (prevIndex: number, index: number): Promise<void> => {
-      if (index === prevIndex) {
-        throw new Error("next() called multiple times");
-      }
-      if (index >= stack.length) {
-        return;
-      }
+      if (index === prevIndex) throw new Error("next() called multiple times");
+      if (index >= stack.length) return;
 
       const middleware = stack[index];
       const next = async () => runner(index, index + 1);
@@ -128,8 +130,6 @@ function usePipeline(...initMiddlewares: Middleware[]): Pipeline {
 }
 
 const createResponse = (body: string, status: number): Response => new Response(body, { status });
-
-const getHostname = (request: Request) => new URL(request.url).host;
 
 export function isPathMatch(request: Request, paths: string[]): ReturnType<typeof isUrlMatch> {
   const pathMatchers = paths.map((path) => ({ path }));
@@ -165,20 +165,25 @@ export function cloneRequest(
   return new Request(url, requestInit);
 }
 
-function getURL(url: string, upstream: UpstreamOptions): string {
+function getURL(url: string, upstream: UpstreamOptions, matchedPattern?: string): string {
   const cloneURL = new URL(url);
   const { domain, port, protocol } = upstream;
 
   cloneURL.hostname = domain;
 
-  if (protocol !== undefined) {
-    cloneURL.protocol = `${protocol}:`;
-  }
+  if (protocol !== undefined) cloneURL.protocol = `${protocol}:`;
 
-  if (port === undefined) {
-    cloneURL.port = "";
-  } else {
-    cloneURL.port = port.toString();
+  cloneURL.port = port === undefined ? "" : port.toString();
+
+  if (upstream.stripPrefix && matchedPattern) {
+    const starIndex = matchedPattern.indexOf("*");
+    if (starIndex !== -1) {
+      const prefix = matchedPattern.slice(0, starIndex);
+      if (cloneURL.pathname.startsWith(prefix)) {
+        const remaining = cloneURL.pathname.slice(prefix.length);
+        cloneURL.pathname = remaining ? "/" + remaining.replace(/^\/+/, "") : "/";
+      }
+    }
   }
 
   return cloneURL.href;
@@ -196,12 +201,12 @@ const useUpstream: Middleware = async (context: Context, next: () => Promise<voi
 
   const onResponse = upstream.onResponse ? convertToArray<OnResponseCallback>(upstream.onResponse) : null;
 
-  const url = getURL(request.url, upstream);
+  const url = getURL(request.url, upstream, context.pattern);
 
   let upstreamRequest = cloneRequest(url, request);
 
   if (onRequest) {
-    upstreamRequest = await processChain(upstreamRequest, onRequest, url, (req) => cloneRequest(url, req));
+    upstreamRequest = await processChain(upstreamRequest, onRequest, url, (req) => cloneRequest(req.url, req));
   }
 
   context.response = await fetch(upstreamRequest);
