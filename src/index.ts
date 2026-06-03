@@ -21,7 +21,6 @@ export interface Route extends PathMatcher {
 
 export interface Context {
   route: Route;
-  hostname: string;
   request: Request;
   response: Response;
   upstream: UpstreamOptions | null;
@@ -83,7 +82,6 @@ export default async function useReflare(): Promise<Reflare> {
     const context: Context = {
       request,
       route: match.route,
-      hostname: new URL(request.url).host,
       response: new Response("Unhandled response"),
       upstream: match.route.upstream,
       pattern: match.pattern,
@@ -181,7 +179,7 @@ function getURL(url: string, upstream: UpstreamOptions, matchedPattern?: string)
       const prefix = matchedPattern.slice(0, starIndex);
       if (cloneURL.pathname.startsWith(prefix)) {
         const remaining = cloneURL.pathname.slice(prefix.length);
-        cloneURL.pathname = remaining ? "/" + remaining.replace(/^\/+/, "") : "/";
+        cloneURL.pathname = remaining ? "/" + remaining.split("/").filter(Boolean).join("/") : "/";
       }
     }
   }
