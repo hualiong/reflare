@@ -1,14 +1,10 @@
-export type OnResponseCallback = (k: Response, url: string) => Response;
-export type OnRequestCallback = (
-  k: Request,
-  url: string
-) => Request | Promise<Request>;
+export type OnResponseCallback = (k: Response, url: string) => Response | Promise<Response>;
+export type OnRequestCallback = (k: Request, url: string) => Request | Promise<Request>;
 
 export interface UpstreamOptions {
   domain: string;
   protocol?: "http" | "https";
   port?: number;
-  timeout?: number;
   onResponse?: OnResponseCallback | OnResponseCallback[];
   onRequest?: OnRequestCallback | OnRequestCallback[];
 }
@@ -30,28 +26,20 @@ export interface Context {
   upstream: UpstreamOptions | null;
 }
 
-export type RouteList = Route[];
-
 export interface Reflare {
   handle: (request: Request) => Promise<Response>;
   unshift: (route: Route) => void;
   push: (route: Route) => void;
 }
 
-export type Middleware = (
-  context: Context,
-  next: () => Promise<void | null> | void | null
-) => Promise<void | null> | void | null;
+export type Middleware = (context: Context, next: () => Promise<void>) => Promise<void> | void;
 
 export interface Pipeline {
-  push: (...middlewares: Middleware[]) => void | null;
-  execute: (context: Context) => Promise<void | null>;
+  push: (...middlewares: Middleware[]) => void;
+  execute: (context: Context) => Promise<void>;
 }
 
-export function isUrlMatch<P extends PathMatcher>(
-  request: Request,
-  matchers: P[]
-): P | void {
+export function isUrlMatch<P extends PathMatcher>(request: Request, matchers: P[]): P | void {
   const url = new URL(request.url);
 
   for (const route of matchers) {
@@ -73,16 +61,13 @@ export function isUrlMatch<P extends PathMatcher>(
 export default async function useReflare(): Promise<Reflare> {
   const pipeline = usePipeline(useUpstream);
 
-  const routeList: RouteList = [];
+  const routeList: Route[] = [];
 
   async function handle(request: Request): Promise<Response> {
     const route = isUrlMatch(request, routeList);
 
     if (route === undefined) {
-      return createResponse(
-        "Failed to find a route that matches the path and method of the current request",
-        500
-      );
+      return createResponse("Failed to find a route that matches the path and method of the current request", 404);
     }
 
     const context: Context = {
@@ -112,11 +97,7 @@ export default async function useReflare(): Promise<Reflare> {
     routeList.push(route);
   }
 
-  return {
-    handle,
-    unshift,
-    push,
-  };
+  return { handle, unshift, push };
 }
 
 function usePipeline(...initMiddlewares: Middleware[]): Pipeline {
@@ -143,25 +124,14 @@ function usePipeline(...initMiddlewares: Middleware[]): Pipeline {
     await runner(-1, 0);
   };
 
-  return {
-    push,
-    execute,
-  };
+  return { push, execute };
 }
 
-const createResponse = (body: string, status: number): Response =>
-  new Response(body, { status });
+const createResponse = (body: string, status: number): Response => new Response(body, { status });
 
-const getHostname = (request: Request): string => {
-  const url = new URL(request.url);
+const getHostname = (request: Request) => new URL(request.url).host;
 
-  return url.host;
-};
-
-export function isPathMatch(
-  request: Request,
-  paths: string[]
-): ReturnType<typeof isUrlMatch> {
+export function isPathMatch(request: Request, paths: string[]): ReturnType<typeof isUrlMatch> {
   const pathMatchers = paths.map((path) => ({ path }));
   return isUrlMatch(request, pathMatchers);
 }
@@ -172,11 +142,11 @@ export function cloneRequest(
   // outgoing request object, an extension of the original Cloudflare request object
   request: Request,
   // properties we want override on the original request object
-  overrides?: RequestInit
+  overrides?: RequestInit,
 ): Request {
   if (!request.redirect) {
     console.error(
-      'Request#redirect property not passed into cloneRequest()!, it will be reset to {redirect:"follow"} which may break 30x redirects downstream!'
+      'Request#redirect property not passed into cloneRequest()!, it will be reset to {redirect:"follow"} which may break 30x redirects downstream!',
     );
   }
 
@@ -188,8 +158,7 @@ export function cloneRequest(
     body: request.body,
     method: request.method,
     headers: request.headers,
-    // @ts-expect-error this property exists within the Cloudflare context
-    cf: request.cf,
+    cf: (request as any).cf,
     ...overrides,
   };
 
@@ -215,10 +184,7 @@ function getURL(url: string, upstream: UpstreamOptions): string {
   return cloneURL.href;
 }
 
-const useUpstream: Middleware = async (
-  context: Context,
-  next: () => Promise<void | null> | void | null
-) => {
+const useUpstream: Middleware = async (context: Context, next: () => Promise<void>) => {
   const { request, upstream } = context;
 
   if (upstream === null) {
@@ -226,49 +192,43 @@ const useUpstream: Middleware = async (
     return;
   }
 
-  const onRequest = upstream.onRequest
-    ? convertToArray<OnRequestCallback>(upstream.onRequest)
-    : null;
+  const onRequest = upstream.onRequest ? convertToArray<OnRequestCallback>(upstream.onRequest) : null;
 
-  const onResponse = upstream.onResponse
-    ? convertToArray<OnResponseCallback>(upstream.onResponse)
-    : null;
+  const onResponse = upstream.onResponse ? convertToArray<OnResponseCallback>(upstream.onResponse) : null;
 
   const url = getURL(request.url, upstream);
 
   let upstreamRequest = cloneRequest(url, request);
 
   if (onRequest) {
-    async function processRequests(
-      upstreamRequest: Request,
-      onRequest: OnRequestCallback[],
-      url: string
-    ): Promise<Request> {
-      return onRequest.reduce(
-        async (prevPromise: Promise<Request>, fn: OnRequestCallback) => {
-          const prevReq: Request = await prevPromise; // Ensure the previous promise resolves
-          return fn(await cloneRequest(url, prevReq), url); // Call the current function with the cloned request
-        },
-        Promise.resolve(upstreamRequest)
-      );
-    }
-
-    upstreamRequest = await processRequests(upstreamRequest, onRequest, url);
+    upstreamRequest = await processChain(upstreamRequest, onRequest, url, (req) => cloneRequest(url, req));
   }
 
   context.response = await fetch(upstreamRequest);
 
   if (onResponse) {
-    context.response = onResponse.reduce(
-      (prevRes: Response, fn: OnResponseCallback) =>
-        fn(new Response(prevRes.body, prevRes), url),
-      new Response(context.response.body, context.response)
+    context.response = await processChain(
+      new Response(context.response.body, context.response),
+      onResponse,
+      url,
+      (res) => new Response(res.body, res),
     );
   }
 
   await next();
 };
 
-const convertToArray = <T>(maybeArray: T | T[]): T[] => {
-  return Array.isArray(maybeArray) ? maybeArray : [maybeArray];
-};
+async function processChain<T>(
+  initial: T,
+  fns: Array<(item: T, url: string) => T | Promise<T>>,
+  url: string,
+  clone: (item: T) => T,
+): Promise<T> {
+  let result: T = initial;
+  for (const fn of fns) {
+    result = await fn(clone(result), url);
+  }
+  return result;
+}
+
+const convertToArray = <T>(maybeArray: T | T[]): T[] => (Array.isArray(maybeArray) ? maybeArray : [maybeArray]);

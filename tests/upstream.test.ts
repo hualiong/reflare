@@ -6,94 +6,111 @@ fetchMock.disableNetConnect();
 
 const origin = fetchMock.get("https://test-domain.com");
 
-test("upstream -> basic", async () => {
-  origin.intercept({ path: "/get" }).reply(200);
+describe("upstream", () => {
+  let reflare: Awaited<ReturnType<typeof useReflare>>;
 
-  const request = new Request("https://localhost/get");
-
-  const reflare = await useReflare();
-
-  reflare.push({
-    path: "/*",
-    upstream: { domain: "test-domain.com" },
+  beforeEach(async () => {
+    reflare = await useReflare();
   });
 
-  const response = await reflare.handle(request);
+  test("basic", async () => {
+    origin.intercept({ path: "/get" }).reply(200);
 
-  expect(response.status).toBe(200);
-  expect(response.url).toBe("https://test-domain.com/get");
-});
+    reflare.push({
+      path: "/*",
+      upstream: { domain: "test-domain.com" },
+    });
 
-// Ensure Regex matches against array of paths
-test("upstream -> path array", async () => {
-  origin.intercept({ path: "/status/200" }).reply(200);
+    const response = await reflare.handle(new Request("https://localhost/get"));
 
-  const request = new Request("https://localhost/status/200");
-
-  const reflare = await useReflare();
-
-  reflare.push({
-    path: ["/wont/match", "/also/wont/match", "/status*"],
-    upstream: { domain: "test-domain.com" },
+    expect(response.status).toBe(200);
+    expect(response.url).toBe("https://test-domain.com/get");
   });
 
-  const response = await reflare.handle(request);
+  test("path array", async () => {
+    origin.intercept({ path: "/status/200" }).reply(200);
 
-  expect(response.status).toBe(200);
-  expect(response.url).toBe("https://test-domain.com/status/200");
-});
+    reflare.push({
+      path: ["/wont/match", "/also/wont/match", "/status*"],
+      upstream: { domain: "test-domain.com" },
+    });
 
-// intercept a request with a specific pathname, (/foo/bar/baz)
-// rewrite the request to a different pathname before it's sent
-test("upstream -> onRequest", async () => {
-  origin.intercept({ path: "/get" }).reply(200);
-  const request = new Request("https://localhost/foo/bar/baz");
-  const reflare = await useReflare();
+    const response = await reflare.handle(new Request("https://localhost/status/200"));
 
-  reflare.push({
-    path: "/foo*",
-    upstream: {
-      domain: "test-domain.com",
-      onRequest: (_req: Request, url: string) => {
-        const next: string = url.replace("foo/bar/baz", "get");
+    expect(response.status).toBe(200);
+    expect(response.url).toBe("https://test-domain.com/status/200");
+  });
 
-        return new Request(next);
+  test("onRequest", async () => {
+    origin.intercept({ path: "/get" }).reply(200);
+
+    reflare.push({
+      path: "/foo*",
+      upstream: {
+        domain: "test-domain.com",
+        onRequest: (_req: Request, url: string) => {
+          return new Request(url.replace("foo/bar/baz", "get"));
+        },
       },
-    },
+    });
+
+    const response = await reflare.handle(new Request("https://localhost/foo/bar/baz"));
+
+    expect(response.status).toBe(200);
+    expect(response.url).toBe("https://test-domain.com/get");
   });
 
-  const response = await reflare.handle(request);
+  test("onResponse (sync)", async () => {
+    origin.intercept({ path: "/foo/bar/baz" }).reply(200);
 
-  expect(response.status).toBe(200);
-  expect(response.url).toBe("https://test-domain.com/get");
-});
+    reflare.push({
+      path: "/foo*",
+      upstream: {
+        domain: "test-domain.com",
+        onResponse: [
+          (res: Response): Response => {
+            res.headers.set("x-foo", (1 + 1).toString());
+            return res;
+          },
+          (res: Response): Response => {
+            res.headers.set("x-bar", "foo");
+            return res;
+          },
+        ],
+      },
+    });
 
-// intercept response and modify it before returning it to caller
-test("upstream -> onRespone", async () => {
-  origin.intercept({ path: "/foo/bar/baz" }).reply(200);
-  const request = new Request("https://localhost/foo/bar/baz");
-  const reflare = await useReflare();
+    const response = await reflare.handle(new Request("https://localhost/foo/bar/baz"));
 
-  reflare.push({
-    path: "/foo*",
-    upstream: {
-      domain: "test-domain.com",
-      onResponse: [
-        (res: Response): Response => {
-          const result = 1 + 1;
-          res.headers.set("x-foo", result.toString());
-          return res;
-        },
-        (res: Response): Response => {
-          res.headers.set("x-bar", "foo");
-          return res;
-        },
-      ],
-    },
+    expect(response.headers.get("x-foo")).toEqual("2");
+    expect(response.headers.get("x-bar")).toEqual("foo");
   });
 
-  const response = await reflare.handle(request);
+  test("onResponse (async)", async () => {
+    origin.intercept({ path: "/foo/bar/baz" }).reply(200);
 
-  expect(response.headers.get("x-foo")).toEqual("2");
-  expect(response.headers.get("x-bar")).toEqual("foo");
+    reflare.push({
+      path: "/foo*",
+      upstream: {
+        domain: "test-domain.com",
+        onResponse: [
+          async (res: Response): Promise<Response> => {
+            // Simulate async work like reading body or doing KV lookup
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            res.headers.set("x-async-1", "yes");
+            return res;
+          },
+          async (res: Response): Promise<Response> => {
+            res.headers.set("x-async-2", "yes");
+            return res;
+          },
+        ],
+      },
+    });
+
+    const response = await reflare.handle(new Request("https://localhost/foo/bar/baz"));
+
+    expect(response.headers.get("x-async-1")).toEqual("yes");
+    expect(response.headers.get("x-async-2")).toEqual("yes");
+  });
 });
