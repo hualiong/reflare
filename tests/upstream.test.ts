@@ -271,5 +271,43 @@ describe("Reflare", () => {
     expect(cloned.redirect).toBe("manual");
     expect(cloned.method).toBe("POST");
   });
+
+  // ── 超时控制 ──────────────────────────────────────────
+
+  test("returns 504 when upstream exceeds timeout", async () => {
+    origin.intercept({ path: "/slow" }).reply(200).delay(200);
+
+    reflare.push({
+      path: "/slow",
+      upstream: { domain: "test-domain.com", timeout: 50 },
+    });
+
+    const response = await reflare.handle(new Request("https://localhost/slow"));
+    expect(response.status).toBe(504);
+  });
+
+  test("does not timeout when upstream responds within timeout", async () => {
+    origin.intercept({ path: "/data" }).reply(200);
+
+    reflare.push({
+      path: "/data",
+      upstream: { domain: "test-domain.com", timeout: 1000 },
+    });
+
+    const response = await reflare.handle(new Request("https://localhost/data"));
+    expect(response.status).toBe(200);
+  });
+
+  test("waits indefinitely when timeout is not set", async () => {
+    origin.intercept({ path: "/slow" }).reply(200).delay(100);
+
+    reflare.push({
+      path: "/slow",
+      upstream: { domain: "test-domain.com" },
+    });
+
+    const response = await reflare.handle(new Request("https://localhost/slow"));
+    expect(response.status).toBe(200);
+  });
 });
 

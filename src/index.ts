@@ -6,6 +6,7 @@ export interface UpstreamOptions {
   protocol?: "http" | "https";
   port?: number;
   stripPrefix?: boolean;
+  timeout?: number;
   onResponse?: OnResponseCallback | OnResponseCallback[];
   onRequest?: OnRequestCallback | OnRequestCallback[];
 }
@@ -215,7 +216,21 @@ const useUpstream: Middleware = async (context: Context, next: () => Promise<voi
     upstreamRequest = await processChain(upstreamRequest, onRequest, url, (req) => cloneRequest(req.url, req));
   }
 
-  context.response = await fetch(upstreamRequest);
+  const controller = new AbortController();
+  const timer =
+    upstream.timeout !== undefined ? setTimeout(() => controller.abort(), upstream.timeout) : undefined;
+
+  try {
+    context.response = await fetch(upstreamRequest, { signal: controller.signal });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      context.response = createResponse("Upstream timeout", 504);
+    } else {
+      throw error;
+    }
+  } finally {
+    clearTimeout(timer);
+  }
 
   if (onResponse) {
     context.response = await processChain(
