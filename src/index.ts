@@ -45,14 +45,22 @@ interface RouteMatch<P extends PathMatcher> {
   pattern: string;
 }
 
+const patternCache = new Map<string, URLPattern>();
+
+function getPattern(path: string): URLPattern {
+  if (!patternCache.has(path)) {
+    patternCache.set(path, new URLPattern({ pathname: path }));
+  }
+  return patternCache.get(path)!;
+}
+
 function matchRoute<P extends PathMatcher>(request: Request, matchers: P[]): RouteMatch<P> | void {
   const url = new URL(request.url);
 
   for (const route of matchers) {
     if (route.methods === undefined || route.methods.includes(request.method)) {
       for (const path of convertToArray<string>(route.path)) {
-        const pattern = new URLPattern({ pathname: path });
-        if (pattern.test(url)) {
+        if (getPattern(path).test(url)) {
           return { route, pattern: path };
         }
       }
