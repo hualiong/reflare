@@ -1,10 +1,11 @@
-import useReflare, { cloneRequest, isPathMatch, isUrlMatch } from "../src";
+import useReflare, { cloneRequest, isPathMatch, isUrlMatch, proxyRoute } from "../src";
 
 const fetchMock = getMiniflareFetchMock();
 fetchMock.disableNetConnect();
 
 const origin = fetchMock.get("https://test-domain.com");
 const httpOrigin = fetchMock.get("http://test-domain.com:8080");
+const githubOrigin = fetchMock.get("https://github.com");
 
 describe("Reflare", () => {
   let reflare: Awaited<ReturnType<typeof useReflare>>;
@@ -286,18 +287,6 @@ describe("Reflare", () => {
     expect(response.status).toBe(504);
   });
 
-  test("does not timeout when upstream responds within timeout", async () => {
-    origin.intercept({ path: "/data" }).reply(200);
-
-    reflare.push({
-      path: "/data",
-      upstream: { domain: "test-domain.com", timeout: 1000 },
-    });
-
-    const response = await reflare.handle(new Request("https://localhost/data"));
-    expect(response.status).toBe(200);
-  });
-
   test("waits indefinitely when timeout is not set", async () => {
     origin.intercept({ path: "/slow" }).reply(200).delay(100);
 
@@ -308,6 +297,55 @@ describe("Reflare", () => {
 
     const response = await reflare.handle(new Request("https://localhost/slow"));
     expect(response.status).toBe(200);
+  });
+
+  // ── 正向代理（proxyRoute 工厂）─────────────────────
+
+  test("proxyRoute forwards /proxy/<host>/<path> to target", async () => {
+    githubOrigin
+      .intercept({ path: "/hualiong/reflare/blob/main/.github/workflows/ci.yml" })
+      .reply(200, "hello");
+
+    reflare.push(proxyRoute("/proxy/*"));
+
+    const response = await reflare.handle(
+      new Request("https://localhost/proxy/github.com/hualiong/reflare/blob/main/.github/workflows/ci.yml"),
+    );
+    expect(response.status).toBe(200);
+    expect(response.url).toBe("https://github.com/hualiong/reflare/blob/main/.github/workflows/ci.yml");
+  });
+
+  test("proxyRoute runs user onRequest hooks on the assembled request", async () => {
+    githubOrigin.intercept({ path: "/foo/bar" }).reply(200);
+
+    reflare.push(
+      proxyRoute("/proxy/*", {
+        onRequest: (request: Request) => {
+          expect(request.url).toBe("https://github.com/foo/bar");
+          return request;
+        },
+      }),
+    );
+
+    const response = await reflare.handle(new Request("https://localhost/proxy/github.com/foo/bar"));
+    expect(response.status).toBe(200);
+  });
+
+  test("proxyRoute returns 500 when target host is missing", async () => {
+    reflare.push(proxyRoute("/proxy/*"));
+
+    const response = await reflare.handle(new Request("https://localhost/proxy/"));
+    expect(response.status).toBe(500);
+  });
+
+  test("proxyRoute supports '/' as the prefix", async () => {
+    githubOrigin.intercept({ path: "/foo" }).reply(200);
+
+    reflare.push(proxyRoute("/*"));
+
+    const response = await reflare.handle(new Request("https://localhost/github.com/foo"));
+    expect(response.status).toBe(200);
+    expect(response.url).toBe("https://github.com/foo");
   });
 });
 

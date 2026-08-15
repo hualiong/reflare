@@ -2,7 +2,7 @@ export type OnResponseCallback = (k: Response, url: string) => Response | Promis
 export type OnRequestCallback = (k: Request, url: string) => Request | Promise<Request>;
 
 export interface UpstreamOptions {
-  domain: string;
+  domain?: string;
   protocol?: "http" | "https";
   port?: number;
   stripPrefix?: boolean;
@@ -143,6 +143,40 @@ export function isPathMatch(request: Request, paths: string[]): ReturnType<typeo
   return isUrlMatch(request, pathMatchers);
 }
 
+export type ProxyRouteOptions = Pick<UpstreamOptions, "protocol" | "onRequest" | "onResponse">;
+
+export function proxyRoute(pattern = "/proxy/*", options: ProxyRouteOptions = {}): Route {
+  const { protocol = "https", onRequest, onResponse } = options;
+
+  if (!pattern.startsWith("/") || !pattern.endsWith("*")) {
+    throw new Error(`proxyRoute pattern must end with "/*", got "${pattern}"`);
+  }
+
+  const prefix = pattern.slice(0, -1);
+
+  return {
+    path: pattern,
+    upstream: {
+      protocol,
+      onRequest: [parseProxyTarget(prefix), ...(onRequest ? convertToArray(onRequest) : [])],
+      onResponse,
+    },
+  };
+}
+
+const parseProxyTarget = (prefix: string): OnRequestCallback => (request, url) => {
+  const target = new URL(url);
+  const rest = target.pathname.slice(prefix.length).replace(/^\/+/, "");
+
+  if (!rest) throw new Error("Missing target host in proxy path");
+
+  const firstSlash = rest.indexOf("/");
+  target.hostname = firstSlash === -1 ? rest : rest.slice(0, firstSlash);
+  target.pathname = firstSlash === -1 ? "/" : rest.slice(firstSlash);
+
+  return cloneRequest(target.toString(), request);
+};
+
 export function cloneRequest(
   // string for outgoing request
   url: string,
@@ -176,7 +210,7 @@ function getURL(url: string, upstream: UpstreamOptions, matchedPattern?: string)
   const cloneURL = new URL(url);
   const { domain, port, protocol } = upstream;
 
-  cloneURL.hostname = domain;
+  if (domain !== undefined) cloneURL.hostname = domain;
 
   if (protocol !== undefined) cloneURL.protocol = `${protocol}:`;
 

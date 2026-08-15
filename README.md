@@ -3,12 +3,12 @@
 </h1>
 
 <p align="center">
-Build proxy piplines with <a href="https://workers.cloudflare.com/">Cloudflare Workers</a>
+Build proxy pipelines with <a href="https://workers.cloudflare.com/">Cloudflare Workers</a>
 </p>
 
-> This package is was originally based on a now-deleted project https://github.com/xiaoyang-sde/reflare. We've heavily modified the original code and removed some functionality.
+> This package was originally based on a now-deleted project https://github.com/xiaoyang-sde/reflare. We've heavily modified the original code and removed some functionality.
 
-**Reflare** is a lightweight and scalable reverse proxy library built for Cloudflare Workers. It sits in front of web servers (e.g. web application, storage platform, or RESTful API), forwards HTTP requests or WebSocket traffic from clients to upstream servers, and transforms requests and responses with several optimizations to improve page loading time.
+**Reflare** is a lightweight and scalable reverse proxy library built for Cloudflare Workers. It sits in front of web servers (e.g. web application, storage platform, or RESTful API), forwards HTTP requests to upstream servers, and lets you transform requests and responses through `onRequest` / `onResponse` hooks.
 
 ## Installation
 
@@ -42,9 +42,9 @@ export default {
       upstream: {
         domain: "httpbin.org",
         protocol: "https",
+        onRequest: (request: Request) => request,
+        onResponse: (response: Response) => response,
       },
-      onRequest: (request: Request) => request,
-      onResponse: (response: Response) => response,
     });
 
     return reflare.handle(request);
@@ -58,16 +58,18 @@ export default {
 
 ```ts
 // Callback types for request and response manipulation
-export type onResponseCallback = (response: Response, url: string) => Response;
-export type onRequestCallback = (request: Request, url: string) => Request;
+export type OnResponseCallback = (response: Response, url: string) => Response | Promise<Response>;
+export type OnRequestCallback = (request: Request, url: string) => Request | Promise<Request>;
 
 // Options for configuring upstream servers
 export interface UpstreamOptions {
-  domain: string;
+  domain?: string;
   protocol?: "http" | "https";
   port?: number;
-  onResponse?: onResponseCallback | onResponseCallback[];
-  onRequest?: onRequestCallback | onRequestCallback[];
+  stripPrefix?: boolean;
+  timeout?: number;
+  onResponse?: OnResponseCallback | OnResponseCallback[];
+  onRequest?: OnRequestCallback | OnRequestCallback[];
 }
 ```
 
@@ -97,10 +99,10 @@ Set up a reverse proxy for https://example.s3.amazonaws.com and add custom heade
   upstream: {
     domain: 'example.s3.amazonaws.com',
     protocol: 'https',
-  },
-  onResponse: (response: Response) => {
-    response.headers.set('x-response-header', 'Hello from Reflare');
-    return response;
+    onResponse: (response: Response) => {
+      response.headers.set('x-response-header', 'Hello from Reflare');
+      return response;
+    },
   },
 }
 ```
@@ -133,6 +135,25 @@ reflare.push({
   },
 });
 ```
+
+#### URL-in-path proxy (`proxyRoute`)
+
+Forward `/<prefix>/<host>/<path>` to `https://<host>/<path>` with a ready-made route. Hooks receive the already-assembled request and response.
+
+```typescript
+import useReflare, { proxyRoute } from "@latticehr/reflare";
+
+reflare.push(
+  proxyRoute("/proxy/*", {
+    onRequest: (request: Request) => request,
+    onResponse: (response: Response) => response,
+  }),
+);
+
+// GET /proxy/github.com/user/repo → https://github.com/user/repo
+```
+
+Note: this is a URL gateway, not a transparent forward proxy — sub-resources (CSS/JS/images) referenced with absolute URLs still load directly from the target origin.
 
 ## Contributing
 
